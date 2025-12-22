@@ -1,0 +1,27 @@
+{
+    "eventType": "com.oraclecloud.objectstorage.createobject",
+    "cloudEventsVersion": "0.1",
+    "eventTypeVersion": "2.0",
+    "source": "ObjectStorage",
+    "eventTime": "2025-12-16T14:59:33Z",
+    "contentType": "application/json",
+    "data": {
+        "compartmentId": "ocid1.compartment.oc1..aaaaaaaaehr5yslhzl2kex3f5oc7ayvfmx7sj63kd4hy5rs6mf65ld2t253a",
+        "compartmentName": "medstreaming",
+        "resourceName": "requirements.txt",
+        "resourceId": "/n/idxhxzdpc23m/b/customer-A-data/o/requirements.txt",
+        "availabilityDomain": "IAD-AD-1",
+        "additionalDetails": {
+            "bucketName": "customer-A-data",
+            "versionId": "7be18a9c-db42-4bd7-9b58-cb8751b19214",
+            "archivalState": "Available",
+            "namespace": "idxhxzdpc23m",
+            "bucketId": "ocid1.bucket.oc1.iad.aaaaaaaa23h2tyqvx6apg7uyigx6dmm6zhbhsogxaiejn5jzku57toguytuq",
+            "eTag": "df6fdd89-ab07-446e-a4bc-95fac3439d57"
+        }
+    },
+    "eventID": "ddf7dd09-be82-64de-2dad-509102a9d52c",
+    "extensions": {
+        "compartmentId": "ocid1.compartment.oc1..aaaaaaaaehr5yslhzl2kex3f5oc7ayvfmx7sj63kd4hy5rs6mf65ld2t253a"
+    }
+}
