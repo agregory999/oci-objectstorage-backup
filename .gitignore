@@ -1,2 +1,5 @@
 # Python virtual environment
 venv/
+
+# Other files
+.DS_Store
