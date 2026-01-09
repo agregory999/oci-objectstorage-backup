@@ -13,13 +13,13 @@ The following sequence diageram summarizes the flow:
 
 ```mermaid
 sequenceDiagram
-    Application Code->>+Backup Bucket: Use NET SDK to write to Bucket
-    Backup Bucket-->>+Application Code: Object Stored
-    Backup Bucket-->>-Function: Emit Object Event (Create)
-    Backup Bucket->>+Function: Get Object
-    Function->>Retention Bucket: Write Object (Same Path/Name)
+    ApplicationCode->>+BackupBucket: Use NET SDK to write to Bucket
+    BackupBucket-->>+ApplicationCode: Object Stored
+    BackupBucket-->>+Function: Emit Object Event (Create)
+    Function-->>Function: OCI Resource Principal
+    BackupBucket-->>RetentionBucket: Copy Object (Server Side)
     Function-->>-Function: Execution Logs (Auto-rotate)
-    Retention Bucket-->>Retention Bucket: Lifecycle Rule (Keep X yrs)
+    RetentionBucket-->>RetentionBucket: Lifecycle Rule (Keep X yrs)
 ```
 
 ## Function App Create
