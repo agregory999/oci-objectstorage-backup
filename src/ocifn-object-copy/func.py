@@ -1,175 +1,248 @@
 import io
 import json
 import logging
-import time
-from typing import Optional
-import oci
-import uuid
-from oci.object_storage.models import CopyObjectDetails
-from fdk import response
 import os
+import time
+import uuid
+from typing import Optional
+
+import oci
+from fdk import response
+from oci.object_storage.models import CopyObjectDetails
+
+
+_TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+def _configure_logger(ctx):
+    """Configure INFO logging by default, with optional DEBUG detail."""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    debug_value = str(ctx.Config().get("DEBUG", "")).strip().lower()
+    if debug_value in _TRUTHY_VALUES:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("DEBUG config detected; log level set to DEBUG")
+
+    return logger
+
+
+def _json_response(ctx, payload):
+    """Build a JSON response for direct invokers of the function."""
+    return response.Response(
+        ctx,
+        response_data=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def _parse_event(data, logger):
+    """Parse the Object Storage event payload and log its receipt."""
+    raw = data.getvalue() if data else b""
+    event = json.loads(raw)
+    logger.info("Received Object Storage event")
+    logger.debug("Incoming event JSON: %s", json.dumps(event))
+    logger.debug("Raw event size: %d bytes", len(raw))
+    return event
+
+
+def _extract_object_details(event):
+    """Return the source namespace, bucket, object, and resource ID from an event."""
+    event_data = event["data"]
+    details = event_data["additionalDetails"]
+    return (
+        details["namespace"],
+        details["bucketName"],
+        event_data["resourceName"],
+        event_data["resourceId"],
+    )
+
+
+def _create_object_storage_client(region, logger):
+    """Create a resource-principal Object Storage client for the function region."""
+    signer = oci.auth.signers.get_resource_principals_signer()
+    client = oci.object_storage.ObjectStorageClient(
+        {},
+        signer=signer,
+        retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY,
+    )
+    client.base_client.set_region(region)
+    logger.info("Set Object Storage client region to %s", region)
+    return client
+
+
+def _backup_bucket_exists(client, namespace, bucket_name, logger):
+    """Return whether the derived backup bucket already exists."""
+    logger.debug("Checking backup bucket %s in namespace %s", bucket_name, namespace)
+    try:
+        client.get_bucket(namespace, bucket_name)
+        logger.info("Backup bucket %s exists", bucket_name)
+        return True
+    except oci.exceptions.ServiceError as error:
+        if error.status != 404:
+            raise
+        return False
+
+
+def _source_bucket_exists(client, namespace, bucket_name, logger):
+    """Return whether the event's source bucket still exists before creating a backup."""
+    logger.debug("Checking source bucket %s in namespace %s", bucket_name, namespace)
+    try:
+        client.get_bucket(namespace, bucket_name)
+        logger.info("Source bucket %s exists", bucket_name)
+        return True
+    except oci.exceptions.ServiceError as error:
+        if error.status != 404:
+            raise
+        return False
+
+
+def _create_backup_bucket(client, namespace, bucket_name, compartment_ocid, logger):
+    """Create the missing backup bucket with Archive as its default storage tier."""
+    logger.info("Backup bucket %s not found; creating it as an Archive bucket", bucket_name)
+    client.create_bucket(
+        namespace,
+        oci.object_storage.models.CreateBucketDetails(
+            name=bucket_name,
+            compartment_id=compartment_ocid,
+            storage_tier="Archive",
+        ),
+    )
+    logger.debug("Created Archive bucket %s in compartment %s", bucket_name, compartment_ocid)
+
+
+def _copy_object(
+    client,
+    namespace,
+    source_bucket,
+    source_object,
+    destination_bucket,
+    region,
+    logger,
+):
+    """Submit an OCI server-side copy request without transferring object bytes through Fn."""
+    copy_details = CopyObjectDetails(
+        source_object_name=source_object,
+        destination_object_name=source_object,
+        destination_namespace=namespace,
+        destination_bucket=destination_bucket,
+        destination_region=region,
+        destination_object_if_none_match_e_tag="*",
+    )
+    request_id = f"fn-copy-{uuid.uuid4()}"
+    logger.debug(
+        "Submitting server-side copy: source=%s/%s, destination=%s/%s, request_id=%s",
+        source_bucket,
+        source_object,
+        destination_bucket,
+        source_object,
+        request_id,
+    )
+
+    start_time = time.perf_counter()
+    try:
+        client.copy_object(
+            namespace,
+            source_bucket,
+            copy_details,
+            opc_client_request_id=request_id,
+            retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY,
+        )
+    except oci.exceptions.ServiceError as error:
+        if error.status != 412:
+            raise
+        logger.info(
+            "Backup object %s already exists in %s; treating copy as successful",
+            source_object,
+            destination_bucket,
+        )
+        return
+
+    elapsed = time.perf_counter() - start_time
+    logger.info(
+        "Submitted copy of %s to backup bucket %s in %.4fs",
+        source_object,
+        destination_bucket,
+        elapsed,
+    )
 
 
 def handler(ctx, data: Optional[io.BytesIO] = None):
-
-    logger = logging.getLogger()
-    # Elevate to DEBUG if function config DEBUG is truthy ("true", "1", "yes", "y", "on")
-    debug_cfg = str(ctx.Config().get("DEBUG", "")).strip().lower()
-    if debug_cfg in {"1", "true", "yes", "y", "on"}:
-        logger.setLevel(logging.DEBUG)
-        logger.debug("DEBUG config detected; log level set to DEBUG")
+    """Copy each Object Storage create-event object to its configured backup bucket."""
+    logger = _configure_logger(ctx)
     backup_compartment_ocid = ctx.Config().get("BACKUP_COMPARTMENT_OCID", "NOT_SET")
-    logger.info(f"Configured BACKUP_COMPARTMENT_OCID: {backup_compartment_ocid}")
+    backup_bucket_suffix = ctx.Config().get("BACKUP_BUCKET_SUFFIX", "-backup")
+    logger.info("Configured BACKUP_COMPARTMENT_OCID: %s", backup_compartment_ocid)
+    logger.info("Configured BACKUP_BUCKET_SUFFIX: %s", backup_bucket_suffix)
 
     try:
-        raw = data.getvalue() if data else b""
-        event_json = json.loads(raw)
-        logger.info(f"Incoming event JSON: {json.dumps(event_json)}")
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Raw event size: {len(raw)} bytes")
-    except Exception as ex:
-        logger.error(f"Error parsing event JSON: {ex}")
-        return response.Response(
-            ctx,
-            response_data=json.dumps({"error": "Invalid event JSON"}),
-            headers={"Content-Type": "application/json"}
-        )
+        event = _parse_event(data, logger)
+    except Exception as error:
+        logger.error("Error parsing event JSON: %s", error)
+        return _json_response(ctx, {"error": "Invalid event JSON"})
 
-    # Extract resourceId, bucketName, and objectName
     try:
-        resource_id = event_json["data"]["resourceId"]
-        bucket_name = event_json["data"]["additionalDetails"]["bucketName"]
-        object_name = event_json["data"]["resourceName"]
-        logger.info(f"resourceId: {resource_id}, bucketName: {bucket_name}, objectName: {object_name}")
-    except Exception as ex:
-        logger.error(f"Missing resourceId, bucketName, or resourceName: {ex}")
-        return response.Response(
-            ctx,
-            response_data=json.dumps({"error": "Missing resourceId, bucketName, or resourceName"}),
-            headers={"Content-Type": "application/json"}
-        )
+        namespace, source_bucket, source_object, resource_id = _extract_object_details(event)
+    except Exception as error:
+        logger.error("Missing Object Storage event details: %s", error)
+        return _json_response(ctx, {"error": "Missing Object Storage event details"})
 
-    # Set up OCI clients
-    signer = oci.auth.signers.get_resource_principals_signer()
-    object_storage = oci.object_storage.ObjectStorageClient(
-        {},
-        signer=signer,
-        retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY
+    logger.info(
+        "Processing resource %s from bucket %s: %s",
+        resource_id,
+        source_bucket,
+        source_object,
     )
-    # Set the region from the Client
     region = os.environ.get("OCI_RESOURCE_PRINCIPAL_REGION")
-    if region:
-        object_storage.base_client.set_region(region)
-        logger.info(f"Set Object Storage client region to {region}")
-    else:
-        logger.error("Missing region in event data")
-        return response.Response(
-            ctx,
-            response_data=json.dumps({"error": "Missing region in event data"}),
-            headers={"Content-Type": "application/json"}
-        )
+    if not region:
+        logger.error("OCI_RESOURCE_PRINCIPAL_REGION is not set")
+        return _json_response(ctx, {"error": "Missing function region"})
 
-    # Get namespace
+    destination_bucket = f"{source_bucket}{backup_bucket_suffix}"
+    logger.debug("Derived backup bucket name: %s", destination_bucket)
+
     try:
-        namespace = event_json["data"]["additionalDetails"]["namespace"]
-    except Exception as ex:
-        logger.error(f"Missing namespace: {ex}")
-        return response.Response(
-            ctx,
-            response_data=json.dumps({"error": "Missing namespace"}),
-            headers={"Content-Type": "application/json"}
-        )
-
-    # Prepare backup bucket name
-    backup_bucket_name = f"{bucket_name}-backup"
-    logger.debug(f"Prepared backup bucket name: {backup_bucket_name}")
-
-    # Check if backup bucket exists, create if not
-    logger.debug(f"Checking/creating backup bucket in namespace '{namespace}'")
-    try:
-        object_storage.get_bucket(namespace, backup_bucket_name)
-        logger.info(f"Backup bucket {backup_bucket_name} exists.")
-    except oci.exceptions.ServiceError as e:
-        if e.status == 404:
-            logger.info(f"Backup bucket {backup_bucket_name} not found. Creating as archive bucket.")
-            object_storage.create_bucket(
+        object_storage = _create_object_storage_client(region, logger)
+        if not _source_bucket_exists(object_storage, namespace, source_bucket, logger):
+            logger.error("Source bucket %s does not exist; not creating a backup bucket", source_bucket)
+            return _json_response(ctx, {"error": "Source bucket does not exist"})
+        if not _backup_bucket_exists(object_storage, namespace, destination_bucket, logger):
+            _create_backup_bucket(
+                object_storage,
                 namespace,
-                oci.object_storage.models.CreateBucketDetails(
-                    name=backup_bucket_name,
-                    compartment_id=backup_compartment_ocid,
-                    storage_tier="Archive"
-                )
+                destination_bucket,
+                backup_compartment_ocid,
+                logger,
             )
-            logger.debug(f"CreateBucketDetails(name={backup_bucket_name}, compartment_id={backup_compartment_ocid}, storage_tier='Archive')")
-        else:
-            logger.error(f"Error checking/creating backup bucket: {e}")
-            return response.Response(
-                ctx,
-                response_data=json.dumps({"error": "Failed to get or create backup bucket"}),
-                headers={"Content-Type": "application/json"}
-            )
+    except Exception as error:
+        logger.error("Failed to get or create backup bucket %s: %s", destination_bucket, error)
+        return _json_response(ctx, {"error": "Failed to get or create backup bucket"})
 
-
-    # Server-side copy to the backup bucket (no download/put through the function)
-    start_copy = None  # perf counter set just before initiating copy
     try:
-        addl = event_json["data"].get("additionalDetails", {})
-        src_etag = addl.get("eTag")
-        src_version = addl.get("versionId")
-        logger.debug(f"Source details for copy: namespace={namespace}, bucket={bucket_name}, object={object_name}, eTag={src_etag}, versionId={src_version}")
-
-        copy_details = CopyObjectDetails(
-            source_object_name=object_name,
-            destination_object_name=object_name,
-            destination_namespace=namespace,
-            destination_bucket=backup_bucket_name,
-            destination_region=region,
-        )
-
-        logger.debug(f"Prepared CopyObjectDetails for destination bucket={backup_bucket_name}, object={object_name}, storage_tier='Archive', if_none_match='*'")
-
-        opc_client_request_id = f"fn-copy-{uuid.uuid4()}"
-        logger.debug(f"Initiating server-side copy with opc_client_request_id={opc_client_request_id}")
-        start_copy = time.perf_counter()
-        object_storage.copy_object(
+        _copy_object(
+            object_storage,
             namespace,
-            bucket_name,
-            copy_details,
-            opc_client_request_id=opc_client_request_id,
-            retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY
+            source_bucket,
+            source_object,
+            destination_bucket,
+            region,
+            logger,
         )
-        copy_time_sec = time.perf_counter() - start_copy
-        logger.info(f"Copied object {object_name} to backup bucket {backup_bucket_name} via server-side copy in {copy_time_sec:.4f}s")
-    except oci.exceptions.ServiceError as e:
-        # 412 => destination already has the object due to IF-NONE-MATCH; treat as success/idempotent
-        if e.status == 412:
-            if start_copy is not None:
-                copy_time_sec = time.perf_counter() - start_copy
-                logger.info(f"Backup object {object_name} already exists in {backup_bucket_name}; treating as success (attempt took {copy_time_sec:.4f}s)")
-            else:
-                logger.info(f"Backup object {object_name} already exists in {backup_bucket_name}; treating as success")
-        else:
-            logger.error(f"Failed to copy object to backup bucket: {e}")
-            return response.Response(
-                ctx,
-                response_data=json.dumps({"error": "Failed to copy object to backup bucket"}),
-                headers={"Content-Type": "application/json"}
-            )
-    except Exception as ex:
-        logger.error(f"Unexpected error during copy: {ex}")
-        return response.Response(
-            ctx,
-            response_data=json.dumps({"error": "Failed to copy object to backup bucket"}),
-            headers={"Content-Type": "application/json"}
-        )
+    except oci.exceptions.ServiceError as error:
+        logger.error("Failed to copy object to backup bucket %s: %s", destination_bucket, error)
+        return _json_response(ctx, {"error": "Failed to copy object to backup bucket"})
+    except Exception as error:
+        logger.error("Unexpected error during copy: %s", error)
+        return _json_response(ctx, {"error": "Failed to copy object to backup bucket"})
 
-    return response.Response(
+    # Direct CLI/SDK invokers receive this body. OCI Events does not display it;
+    # the INFO log above is the operational record for event-driven copies.
+    return _json_response(
         ctx,
-        response_data=json.dumps({
+        {
             "status": "success",
-            "source_bucket": bucket_name,
-            "backup_bucket": backup_bucket_name,
-            "object": object_name
-        }),
-        headers={"Content-Type": "application/json"}
+            "source_bucket": source_bucket,
+            "backup_bucket": destination_bucket,
+            "object": source_object,
+        },
     )

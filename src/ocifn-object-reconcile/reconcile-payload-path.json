@@ -1,0 +1,4 @@
+{
+  "SOURCE_BUCKET": "customer-A-data",
+  "SOURCE_PREFIX": "test/"
+}
