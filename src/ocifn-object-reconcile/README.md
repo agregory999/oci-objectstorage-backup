@@ -1,5 +1,7 @@
 # Reconciliation function
 
+> **Important:** This repository is sample code and is not supported by Oracle. Review all accompanying documentation, test thoroughly in a non-production environment, and use it carefully before relying on it for production, recovery, or compliance workloads.
+
 `ocifn-object-reconcile` is a scheduled safety net for the event copy function. It compares a source bucket and its backup bucket, then submits server-side copies only for source object names missing from the destination. Deploy it once, then create one or more Resource Scheduler schedules; each schedule supplies its source bucket and optional object-name prefix in its invocation payload.
 
 It pages through both `ListObjects` results in lexical order and merge-compares object names. There are no per-object `HEAD` requests and no object data passes through the function. One million objects in each bucket requires approximately 2,000 list requests, plus a `CopyObject` request for each missing object.

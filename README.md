@@ -1,14 +1,16 @@
 # OCI Object Copy Upon Write
 
+> **Important:** This repository is sample code and is not supported by Oracle. Review all accompanying documentation, test thoroughly in a non-production environment, and use it carefully before relying on it for production, recovery, or compliance workloads.
+
 This project maintains independent, retention-ready copies of objects written to OCI Object Storage buckets. It is designed for write-once data: copied objects are never deleted when their source is deleted.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    S["Source bucket"] -->|"Object Create event"| E["Event copy function"]
+    S["Source bucket (Emit Events)"] -->|"Object Create event"| E["Event copy function (per compartment)"]
     E -->|"Server-side CopyObject"| B["Archive backup bucket"]
-    R["Resource Scheduler: weekly"] --> C["Reconciliation function"]
+    R["Resource Scheduler: weekly"] --> C["Reconciliation function (per bucket)"]
     C -->|"List and compare names"| B
 ```
 

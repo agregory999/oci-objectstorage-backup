@@ -1,5 +1,7 @@
 # Setup guide
 
+> **Important:** This repository is sample code and is not supported by Oracle. Review all accompanying documentation, test thoroughly in a non-production environment, and use it carefully before relying on it for production, recovery, or compliance workloads.
+
 This guide contains prerequisites shared by both functions. Function-specific configuration and deployment steps live in each function's README.
 
 ## OCI Functions prerequisites

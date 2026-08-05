@@ -1,5 +1,7 @@
 # Event copy function
 
+> **Important:** This repository is sample code and is not supported by Oracle. Review all accompanying documentation, test thoroughly in a non-production environment, and use it carefully before relying on it for production, recovery, or compliance workloads.
+
 `ocifn-object-copy` is invoked by an OCI Object Storage **Object - Create** event. It copies the created object to an Archive-tier backup bucket through OCI's server-side `CopyObject` API.
 
 ## Behavior
