@@ -1,4 +1,4 @@
-# OCI Object Copy Upon Write
+# OCI Object Storage Archive Backup
 
 > **Important:** This repository is sample code and is not supported by Oracle. Review all accompanying documentation, test thoroughly in a non-production environment, and use it carefully before relying on it for production, recovery, or compliance workloads.
 
